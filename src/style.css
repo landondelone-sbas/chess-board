@@ -1,0 +1,354 @@
+:root {
+  --light-square: #f0d9b5;
+  --dark-square: #b58863;
+  --highlight-select: #f6f669;
+  --highlight-move: rgba(20, 130, 60, 0.55);
+  --highlight-capture: rgba(200, 40, 40, 0.55);
+  --check-color: rgba(220, 20, 20, 0.75);
+  --bg: #1b1a17;
+  --panel-bg: #2a2823;
+  --text: #f2ede4;
+  --accent: #c9a227;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--text);
+  display: flex;
+  justify-content: center;
+  padding: 24px 16px 48px;
+}
+
+#app {
+  width: 100%;
+  max-width: 900px;
+}
+
+.app-shell {
+  position: relative;
+}
+
+.lcd-badge {
+  position: fixed;
+  top: 14px;
+  right: 18px;
+  padding: 4px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--accent);
+  background: rgba(201, 162, 39, 0.08);
+  z-index: 20;
+  user-select: none;
+}
+
+.app-header {
+  text-align: center;
+  margin-bottom: 12px;
+}
+
+.app-header h1 {
+  margin: 0 0 4px;
+  font-size: 1.8rem;
+  letter-spacing: 0.02em;
+}
+
+.status {
+  font-size: 1rem;
+  color: #cfc9bd;
+  min-height: 1.4em;
+}
+
+.status-check {
+  color: #e8a33d;
+  font-weight: 600;
+}
+
+.status-end {
+  color: #e85d3d;
+  font-weight: 700;
+}
+
+.toolbar {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  margin-top: 10px;
+}
+
+.toggle-btn {
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid #55503f;
+  background: transparent;
+  color: #cfc9bd;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.toggle-btn.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(201, 162, 39, 0.1);
+}
+
+.coach {
+  font-size: 0.85rem;
+  line-height: 1.4;
+  color: #d8d2c4;
+  background: rgba(0, 0, 0, 0.2);
+  border: 1px solid #423d30;
+  border-radius: 6px;
+  padding: 8px 10px;
+  min-height: 3.4em;
+}
+
+.coach.hidden {
+  display: none;
+}
+
+.coach em {
+  color: #b9b2a0;
+  font-style: normal;
+}
+
+.game-area {
+  display: flex;
+  gap: 20px;
+  justify-content: center;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+
+.board {
+  display: grid;
+  grid-template-columns: repeat(8, minmax(36px, 60px));
+  grid-template-rows: repeat(8, minmax(36px, 60px));
+  transform: scaleY(-1);
+  border: 4px solid #40382c;
+  border-radius: 4px;
+  overflow: hidden;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+}
+
+.square {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: clamp(1.6rem, 4vw, 2.6rem);
+  cursor: pointer;
+  position: relative;
+  transform: scaleY(-1);
+  user-select: none;
+}
+
+.square.light {
+  background: var(--light-square);
+}
+
+.square.dark {
+  background: var(--dark-square);
+}
+
+.square.piece-white {
+  color: #fdfdfd;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+
+.square.piece-black {
+  color: #111;
+  text-shadow: 0 1px 1px rgba(255, 255, 255, 0.15);
+}
+
+.square.selected {
+  box-shadow: inset 0 0 0 4px var(--highlight-select);
+}
+
+.coord-label {
+  position: absolute;
+  font-size: 0.65rem;
+  font-weight: 700;
+  line-height: 1;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+}
+
+.board.show-coords .coord-label {
+  opacity: 0.7;
+}
+
+.file-label {
+  bottom: 3px;
+  left: 4px;
+}
+
+.rank-label {
+  top: 3px;
+  left: 4px;
+}
+
+.square.light .coord-label {
+  color: var(--dark-square);
+}
+
+.square.dark .coord-label {
+  color: var(--light-square);
+}
+
+.square.legal-move::after {
+  content: "";
+  position: absolute;
+  width: 26%;
+  height: 26%;
+  border-radius: 50%;
+  background: var(--highlight-move);
+}
+
+.square.legal-capture::after {
+  content: "";
+  position: absolute;
+  inset: 6%;
+  border-radius: 50%;
+  border: 4px solid var(--highlight-capture);
+}
+
+.square.in-check {
+  box-shadow: inset 0 0 0 4px var(--check-color);
+  animation: pulse-check 1s ease-in-out infinite;
+}
+
+@keyframes pulse-check {
+  0%, 100% { box-shadow: inset 0 0 0 4px var(--check-color); }
+  50% { box-shadow: inset 0 0 0 4px transparent; }
+}
+
+.side-panel {
+  width: 220px;
+  background: var(--panel-bg);
+  border-radius: 8px;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 480px;
+}
+
+.side-panel h2 {
+  font-size: 0.9rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #cfc9bd;
+  margin: 4px 0 0;
+}
+
+.graveyard {
+  min-height: 1.8em;
+  font-size: 1.3rem;
+  line-height: 1.3;
+  word-break: break-all;
+}
+
+.captured-piece {
+  margin-right: 2px;
+}
+
+.history {
+  flex: 1;
+  overflow-y: auto;
+  margin: 0;
+  padding-left: 1.4em;
+  font-size: 0.9rem;
+  font-family: "Cascadia Code", Consolas, monospace;
+}
+
+.history li {
+  display: flex;
+  gap: 10px;
+}
+
+.move-white,
+.move-black {
+  min-width: 3.5em;
+}
+
+.new-game-btn {
+  margin-top: auto;
+  padding: 8px 12px;
+  border: 1px solid var(--accent);
+  background: transparent;
+  color: var(--accent);
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.new-game-btn:hover {
+  background: rgba(201, 162, 39, 0.12);
+}
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 30;
+}
+
+.modal-overlay.hidden {
+  display: none;
+}
+
+.modal {
+  background: var(--panel-bg);
+  border-radius: 10px;
+  padding: 20px 24px;
+  text-align: center;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+}
+
+.modal h3 {
+  margin-top: 0;
+}
+
+.promotion-options {
+  display: flex;
+  gap: 8px;
+}
+
+.promotion-choice {
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  background: rgba(201, 162, 39, 0.1);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 1rem;
+}
+
+.promotion-choice:hover {
+  background: rgba(201, 162, 39, 0.25);
+}
+
+@media (max-width: 640px) {
+  .game-area {
+    flex-direction: column;
+    align-items: center;
+  }
+  .side-panel {
+    width: 100%;
+    max-width: 480px;
+  }
+}
