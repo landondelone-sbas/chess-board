@@ -79,6 +79,15 @@ body {
   font-weight: 700;
 }
 
+.status-thinking {
+  color: var(--accent);
+  font-style: italic;
+}
+
+.toggle-btn.hidden {
+  display: none;
+}
+
 .toolbar {
   display: flex;
   gap: 8px;

@@ -1,7 +1,11 @@
-import type { GameState, Move, Piece, PieceType } from "./types";
+import type { Color, GameState, Move, Piece, PieceType } from "./types";
 import { fileOf, rankOf, toAlgebraic, opponent } from "./board";
 import { createInitialState, getLegalMoves, makeMove } from "./engine";
 import { findKing, generatePseudoLegalMoves, getAttackers } from "./moveGenerator";
+import { chooseComputerMove } from "./ai";
+
+const DIFFICULTY_LABELS = ["Easy", "Medium", "Hard"] as const;
+const DIFFICULTY_DEPTHS = [1, 2, 3] as const;
 
 const PIECE_GLYPHS: Record<Piece["color"], Record<PieceType, string>> = {
   w: { k: "♔", q: "♕", r: "♖", b: "♗", n: "♘", p: "♙" },
@@ -25,6 +29,10 @@ export class ChessUI {
   private legalMoves: Move[] = [];
   private teachingMode = true;
   private showCoords = true;
+  private opponent: "human" | "computer" = "human";
+  private humanColor: Color = "w";
+  private difficulty = 1; // index into DIFFICULTY_LABELS/DIFFICULTY_DEPTHS
+  private thinking = false;
 
   private root: HTMLElement;
   private boardEl!: HTMLElement;
@@ -35,6 +43,9 @@ export class ChessUI {
   private coachEl!: HTMLElement;
   private teachingToggle!: HTMLButtonElement;
   private coordsToggle!: HTMLButtonElement;
+  private opponentToggle!: HTMLButtonElement;
+  private colorToggle!: HTMLButtonElement;
+  private difficultyToggle!: HTMLButtonElement;
   private promotionModal!: HTMLElement;
   private promotionOptions!: HTMLElement;
 
@@ -54,6 +65,9 @@ export class ChessUI {
           <div class="toolbar">
             <button class="toggle-btn" id="teaching-toggle" type="button"></button>
             <button class="toggle-btn" id="coords-toggle" type="button"></button>
+            <button class="toggle-btn" id="opponent-toggle" type="button"></button>
+            <button class="toggle-btn" id="color-toggle" type="button"></button>
+            <button class="toggle-btn" id="difficulty-toggle" type="button"></button>
           </div>
         </header>
         <div class="game-area">
@@ -84,14 +98,14 @@ export class ChessUI {
     this.coachEl = this.root.querySelector("#coach")!;
     this.teachingToggle = this.root.querySelector("#teaching-toggle")!;
     this.coordsToggle = this.root.querySelector("#coords-toggle")!;
+    this.opponentToggle = this.root.querySelector("#opponent-toggle")!;
+    this.colorToggle = this.root.querySelector("#color-toggle")!;
+    this.difficultyToggle = this.root.querySelector("#difficulty-toggle")!;
     this.promotionModal = this.root.querySelector("#promotion-modal")!;
     this.promotionOptions = this.root.querySelector("#promotion-options")!;
 
     this.root.querySelector("#new-game")!.addEventListener("click", () => {
-      this.state = createInitialState();
-      this.selected = null;
-      this.legalMoves = [];
-      this.render();
+      this.startNewGame();
     });
 
     this.teachingToggle.addEventListener("click", () => {
@@ -101,6 +115,21 @@ export class ChessUI {
 
     this.coordsToggle.addEventListener("click", () => {
       this.showCoords = !this.showCoords;
+      this.render();
+    });
+
+    this.opponentToggle.addEventListener("click", () => {
+      this.opponent = this.opponent === "human" ? "computer" : "human";
+      this.startNewGame();
+    });
+
+    this.colorToggle.addEventListener("click", () => {
+      this.humanColor = this.humanColor === "w" ? "b" : "w";
+      this.startNewGame();
+    });
+
+    this.difficultyToggle.addEventListener("click", () => {
+      this.difficulty = (this.difficulty + 1) % DIFFICULTY_LABELS.length;
       this.render();
     });
 
@@ -139,8 +168,19 @@ export class ChessUI {
     }
   }
 
+  private startNewGame() {
+    this.state = createInitialState();
+    this.selected = null;
+    this.legalMoves = [];
+    this.thinking = false;
+    this.render();
+    this.maybeTriggerAiMove();
+  }
+
   private onSquareClick(index: number) {
     if (this.state.status === "checkmate" || this.state.status === "stalemate") return;
+    if (this.thinking) return;
+    if (this.opponent === "computer" && this.state.turn !== this.humanColor) return;
 
     const targetMove = this.legalMoves.find((m) => m.to === index);
     if (this.selected !== null && targetMove) {
@@ -184,6 +224,25 @@ export class ChessUI {
     this.selected = null;
     this.legalMoves = [];
     this.render();
+    this.maybeTriggerAiMove();
+  }
+
+  private maybeTriggerAiMove() {
+    if (this.opponent !== "computer") return;
+    if (this.state.status === "checkmate" || this.state.status === "stalemate") return;
+    if (this.state.turn === this.humanColor) return;
+
+    this.thinking = true;
+    this.render();
+
+    setTimeout(() => {
+      const move = chooseComputerMove(this.state, DIFFICULTY_DEPTHS[this.difficulty]);
+      if (move) this.state = makeMove(this.state, move);
+      this.thinking = false;
+      this.selected = null;
+      this.legalMoves = [];
+      this.render();
+    }, 50);
   }
 
   private render() {
@@ -194,6 +253,13 @@ export class ChessUI {
     this.teachingToggle.classList.toggle("active", this.teachingMode);
     this.coordsToggle.textContent = `Coordinates: ${this.showCoords ? "On" : "Off"}`;
     this.coordsToggle.classList.toggle("active", this.showCoords);
+
+    this.opponentToggle.textContent = `Opponent: ${this.opponent === "human" ? "Human" : "Computer"}`;
+    this.opponentToggle.classList.toggle("active", this.opponent === "computer");
+    this.colorToggle.textContent = `You play: ${this.humanColor === "w" ? "White" : "Black"}`;
+    this.colorToggle.classList.toggle("hidden", this.opponent !== "computer");
+    this.difficultyToggle.textContent = `Difficulty: ${DIFFICULTY_LABELS[this.difficulty]}`;
+    this.difficultyToggle.classList.toggle("hidden", this.opponent !== "computer");
 
     for (let i = 0; i < 64; i++) {
       const square = this.boardEl.children[i] as HTMLElement;
@@ -222,7 +288,10 @@ export class ChessUI {
     }
 
     const colorName = (c: "w" | "b") => (c === "w" ? "White" : "Black");
-    if (status === "checkmate") {
+    if (this.thinking) {
+      this.statusEl.textContent = "Computer is thinking…";
+      this.statusEl.className = "status status-thinking";
+    } else if (status === "checkmate") {
       this.statusEl.textContent = `Checkmate — ${colorName(turn === "w" ? "b" : "w")} wins!`;
       this.statusEl.className = "status status-end";
     } else if (status === "stalemate") {
