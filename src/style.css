@@ -351,6 +351,129 @@ body {
   background: rgba(201, 162, 39, 0.25);
 }
 
+.online-banner {
+  font-size: 0.85rem;
+  margin-top: 6px;
+  min-height: 1.2em;
+}
+
+.online-banner.hidden {
+  display: none;
+}
+
+.online-banner.status-connected {
+  color: #6fbf73;
+}
+
+.online-banner.status-waiting,
+.online-banner.status-connecting {
+  color: var(--accent);
+  font-style: italic;
+}
+
+.online-banner.status-disconnected {
+  color: #e85d3d;
+  font-weight: 600;
+}
+
+.board.net-frozen {
+  pointer-events: none;
+  opacity: 0.6;
+}
+
+.online-modal {
+  min-width: 280px;
+  max-width: 340px;
+}
+
+.online-modal-body p {
+  margin: 0 0 10px;
+  font-size: 0.9rem;
+  color: #d8d2c4;
+}
+
+.online-modal-body hr {
+  border: none;
+  border-top: 1px solid #423d30;
+  margin: 14px 0;
+}
+
+.online-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.online-row input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid #55503f;
+  background: rgba(0, 0, 0, 0.25);
+  color: var(--text);
+  font-size: 0.95rem;
+  text-transform: uppercase;
+}
+
+.primary-btn {
+  width: 100%;
+  padding: 10px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--accent);
+  background: rgba(201, 162, 39, 0.12);
+  color: var(--accent);
+  font-weight: 600;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+.primary-btn:hover {
+  background: rgba(201, 162, 39, 0.25);
+}
+
+.online-row .primary-btn {
+  width: auto;
+  flex-shrink: 0;
+}
+
+.room-code {
+  font-size: 1.8rem;
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  color: var(--accent);
+  margin-bottom: 12px;
+}
+
+.online-waiting {
+  font-style: italic;
+  color: #b9b2a0;
+  margin-top: 12px;
+}
+
+.online-error {
+  color: #e85d3d;
+  font-size: 0.85rem;
+}
+
+.modal-close-btn {
+  margin-top: 16px;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid #55503f;
+  background: transparent;
+  color: #cfc9bd;
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+
+.modal-close-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
 @media (max-width: 640px) {
   .game-area {
     flex-direction: column;

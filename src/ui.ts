@@ -1,11 +1,16 @@
-import type { Color, GameState, Move, Piece, PieceType } from "./types";
+import type { Color, ConnectionStatus, GameState, Move, Piece, PieceType } from "./types";
 import { fileOf, rankOf, toAlgebraic, opponent } from "./board";
 import { createInitialState, getLegalMoves, makeMove } from "./engine";
 import { findKing, generatePseudoLegalMoves, getAttackers } from "./moveGenerator";
 import { chooseComputerMove } from "./ai";
+import { RoomConnection } from "./net";
 
 const DIFFICULTY_LABELS = ["Easy", "Medium", "Hard"] as const;
 const DIFFICULTY_DEPTHS = [1, 2, 3] as const;
+const OPPONENT_MODES = ["human", "computer", "online"] as const;
+type OpponentMode = (typeof OPPONENT_MODES)[number];
+const WS_URL = import.meta.env.VITE_WS_URL;
+const ONLINE_STATE_KEY = "chess-net-state";
 
 const PIECE_GLYPHS: Record<Piece["color"], Record<PieceType, string>> = {
   w: { k: "♔", q: "♕", r: "♖", b: "♗", n: "♘", p: "♙" },
@@ -29,14 +34,22 @@ export class ChessUI {
   private legalMoves: Move[] = [];
   private teachingMode = true;
   private showCoords = true;
-  private opponent: "human" | "computer" = "human";
+  private opponent: OpponentMode = "human";
   private humanColor: Color = "w";
   private difficulty = 1; // index into DIFFICULTY_LABELS/DIFFICULTY_DEPTHS
   private thinking = false;
 
+  private net: RoomConnection | null = null;
+  private onlineColor: Color | null = null;
+  private onlinePreferredColor: Color = "w";
+  private connectionStatus: ConnectionStatus = "idle";
+  private onlineStep: "choice" | "connecting" | "creating" | "waiting" | "joining" = "choice";
+  private onlineError: string | null = null;
+
   private root: HTMLElement;
   private boardEl!: HTMLElement;
   private statusEl!: HTMLElement;
+  private onlineBanner!: HTMLElement;
   private capturedWhiteEl!: HTMLElement;
   private capturedBlackEl!: HTMLElement;
   private historyEl!: HTMLElement;
@@ -48,10 +61,16 @@ export class ChessUI {
   private difficultyToggle!: HTMLButtonElement;
   private promotionModal!: HTMLElement;
   private promotionOptions!: HTMLElement;
+  private onlineModal!: HTMLElement;
+  private onlineModalBody!: HTMLElement;
 
   constructor(root: HTMLElement) {
     this.root = root;
     this.buildLayout();
+    if (RoomConnection.hasStoredSession()) {
+      this.opponent = "online";
+      this.enterOnlineMode();
+    }
     this.render();
   }
 
@@ -62,6 +81,7 @@ export class ChessUI {
         <header class="app-header">
           <h1>LocalChess</h1>
           <div class="status" id="status"></div>
+          <div class="online-banner hidden" id="online-banner"></div>
           <div class="toolbar">
             <button class="toggle-btn" id="teaching-toggle" type="button"></button>
             <button class="toggle-btn" id="coords-toggle" type="button"></button>
@@ -88,10 +108,18 @@ export class ChessUI {
           <div class="promotion-options" id="promotion-options"></div>
         </div>
       </div>
+      <div class="modal-overlay hidden" id="online-modal">
+        <div class="modal online-modal">
+          <h3>Play Online</h3>
+          <div class="online-modal-body" id="online-modal-body"></div>
+          <button class="modal-close-btn" id="online-modal-close" type="button">Cancel</button>
+        </div>
+      </div>
     `;
 
     this.boardEl = this.root.querySelector("#board")!;
     this.statusEl = this.root.querySelector("#status")!;
+    this.onlineBanner = this.root.querySelector("#online-banner")!;
     this.capturedWhiteEl = this.root.querySelector("#captured-white")!;
     this.capturedBlackEl = this.root.querySelector("#captured-black")!;
     this.historyEl = this.root.querySelector("#history")!;
@@ -103,8 +131,18 @@ export class ChessUI {
     this.difficultyToggle = this.root.querySelector("#difficulty-toggle")!;
     this.promotionModal = this.root.querySelector("#promotion-modal")!;
     this.promotionOptions = this.root.querySelector("#promotion-options")!;
+    this.onlineModal = this.root.querySelector("#online-modal")!;
+    this.onlineModalBody = this.root.querySelector("#online-modal-body")!;
+
+    this.root.querySelector("#online-modal-close")!.addEventListener("click", () => {
+      this.setOpponentMode("human");
+    });
 
     this.root.querySelector("#new-game")!.addEventListener("click", () => {
+      if (this.opponent === "online") {
+        if (this.connectionStatus !== "connected") return;
+        this.net?.sendRestart();
+      }
       this.startNewGame();
     });
 
@@ -119,8 +157,8 @@ export class ChessUI {
     });
 
     this.opponentToggle.addEventListener("click", () => {
-      this.opponent = this.opponent === "human" ? "computer" : "human";
-      this.startNewGame();
+      const next = OPPONENT_MODES[(OPPONENT_MODES.indexOf(this.opponent) + 1) % OPPONENT_MODES.length];
+      this.setOpponentMode(next);
     });
 
     this.colorToggle.addEventListener("click", () => {
@@ -173,14 +211,195 @@ export class ChessUI {
     this.selected = null;
     this.legalMoves = [];
     this.thinking = false;
+    if (this.opponent === "online") this.persistOnlineState();
     this.render();
     this.maybeTriggerAiMove();
+  }
+
+  private setOpponentMode(mode: OpponentMode) {
+    if (this.opponent === "online" && mode !== "online") {
+      this.net?.leave();
+      this.net = null;
+      this.onlineColor = null;
+      this.connectionStatus = "idle";
+      sessionStorage.removeItem(ONLINE_STATE_KEY);
+      this.hideOnlineModal();
+    }
+    this.opponent = mode;
+    if (mode === "online") {
+      this.enterOnlineMode();
+    } else {
+      this.startNewGame();
+    }
+    this.render();
+  }
+
+  private enterOnlineMode() {
+    this.net = new RoomConnection(WS_URL);
+    this.wireNetHandlers(this.net);
+    this.onlineError = null;
+
+    if (this.net.hasStoredSession()) {
+      this.onlineStep = "connecting";
+      this.showOnlineModal();
+      this.net
+        .rejoin()
+        .then(({ color }) => {
+          this.onlineColor = color;
+          const saved = sessionStorage.getItem(ONLINE_STATE_KEY);
+          this.state = saved ? (JSON.parse(saved) as GameState) : createInitialState();
+          this.selected = null;
+          this.legalMoves = [];
+          this.hideOnlineModal();
+          this.render();
+        })
+        .catch(() => {
+          this.net?.leave();
+          sessionStorage.removeItem(ONLINE_STATE_KEY);
+          this.onlineStep = "choice";
+          this.renderOnlinePanel();
+        });
+      return;
+    }
+
+    const roomFromUrl = new URLSearchParams(location.search).get("room");
+    this.onlineStep = "choice";
+    this.showOnlineModal(roomFromUrl ?? "");
+  }
+
+  private wireNetHandlers(net: RoomConnection) {
+    net.onConnectionStatus((status) => {
+      this.connectionStatus = status;
+      this.render();
+    });
+    net.onOpponentJoined(() => {
+      this.startNewGame();
+      this.hideOnlineModal();
+    });
+    net.onOpponentMove((move) => {
+      this.state = makeMove(this.state, move);
+      this.selected = null;
+      this.legalMoves = [];
+      this.persistOnlineState();
+      this.render();
+    });
+    net.onOpponentRestart(() => {
+      this.startNewGame();
+    });
+    net.onOpponentLeft(() => this.render());
+    net.onOpponentReconnected(() => this.render());
+  }
+
+  private persistOnlineState() {
+    sessionStorage.setItem(ONLINE_STATE_KEY, JSON.stringify(this.state));
+  }
+
+  private showOnlineModal(roomCodeInputValue = "") {
+    this.onlineModal.classList.remove("hidden");
+    this.renderOnlinePanel(roomCodeInputValue);
+  }
+
+  private hideOnlineModal() {
+    this.onlineModal.classList.add("hidden");
+  }
+
+  private renderOnlinePanel(roomCodeInputValue = "") {
+    const body = this.onlineModalBody;
+    const errorHtml = this.onlineError ? `<p class="online-error">${this.onlineError}</p>` : "";
+
+    if (this.onlineStep === "connecting") {
+      body.innerHTML = `<p>Reconnecting to your game…</p>`;
+      return;
+    }
+
+    if (this.onlineStep === "creating") {
+      body.innerHTML = `<p>Creating room…</p>`;
+      return;
+    }
+
+    if (this.onlineStep === "joining") {
+      body.innerHTML = `<p>Joining room…</p>`;
+      return;
+    }
+
+    const activeRoom = this.net?.currentRoom ?? null;
+    if (this.onlineStep === "waiting" && activeRoom) {
+      const link = `${location.origin}${location.pathname}?room=${activeRoom}`;
+      body.innerHTML = `
+        <p>Share this code or link with your opponent:</p>
+        <div class="room-code">${activeRoom}</div>
+        <button type="button" class="primary-btn" id="online-copy-link">Copy Link</button>
+        <p class="online-waiting">Waiting for opponent to join…</p>
+      `;
+      body.querySelector("#online-copy-link")!.addEventListener("click", () => {
+        navigator.clipboard?.writeText(link);
+      });
+      return;
+    }
+
+    body.innerHTML = `
+      <p>Create a game and share the link with a friend, or join one they've shared with you.</p>
+      <div class="online-row">
+        <span>You'll play:</span>
+        <button type="button" class="toggle-btn" id="online-color-toggle">${this.onlinePreferredColor === "w" ? "White" : "Black"}</button>
+      </div>
+      <button type="button" class="primary-btn" id="online-create-btn">Create Game</button>
+      <hr />
+      <div class="online-row">
+        <input type="text" id="online-room-input" maxlength="5" placeholder="Room code" value="${roomCodeInputValue}" />
+        <button type="button" class="primary-btn" id="online-join-btn">Join Game</button>
+      </div>
+      ${errorHtml}
+    `;
+
+    body.querySelector("#online-color-toggle")!.addEventListener("click", () => {
+      this.onlinePreferredColor = this.onlinePreferredColor === "w" ? "b" : "w";
+      this.renderOnlinePanel(roomCodeInputValue);
+    });
+
+    body.querySelector("#online-create-btn")!.addEventListener("click", () => {
+      this.onlineStep = "creating";
+      this.onlineError = null;
+      this.renderOnlinePanel();
+      this.net!.createRoom(this.onlinePreferredColor)
+        .then(({ color }) => {
+          this.onlineColor = color;
+          this.onlineStep = "waiting";
+          this.renderOnlinePanel();
+        })
+        .catch(() => {
+          this.onlineError = "Could not create a game. Please try again.";
+          this.onlineStep = "choice";
+          this.renderOnlinePanel();
+        });
+    });
+
+    const input = body.querySelector<HTMLInputElement>("#online-room-input")!;
+    body.querySelector("#online-join-btn")!.addEventListener("click", () => {
+      const code = input.value.trim();
+      if (!code) return;
+      this.onlineStep = "joining";
+      this.onlineError = null;
+      this.renderOnlinePanel();
+      this.net!.joinRoom(code)
+        .then(({ color }) => {
+          this.onlineColor = color;
+          this.startNewGame();
+          this.hideOnlineModal();
+        })
+        .catch((err: Error) => {
+          this.onlineError = err.message === "room-full" ? "That room is already full." : "Room not found — check the code.";
+          this.onlineStep = "choice";
+          this.renderOnlinePanel(code);
+        });
+    });
   }
 
   private onSquareClick(index: number) {
     if (this.state.status === "checkmate" || this.state.status === "stalemate") return;
     if (this.thinking) return;
     if (this.opponent === "computer" && this.state.turn !== this.humanColor) return;
+    if (this.opponent === "online" && (this.connectionStatus !== "connected" || this.state.turn !== this.onlineColor)) return;
 
     const targetMove = this.legalMoves.find((m) => m.to === index);
     if (this.selected !== null && targetMove) {
@@ -223,6 +442,10 @@ export class ChessUI {
     this.state = makeMove(this.state, move);
     this.selected = null;
     this.legalMoves = [];
+    if (this.opponent === "online") {
+      this.net?.sendMove(move);
+      this.persistOnlineState();
+    }
     this.render();
     this.maybeTriggerAiMove();
   }
@@ -254,12 +477,31 @@ export class ChessUI {
     this.coordsToggle.textContent = `Coordinates: ${this.showCoords ? "On" : "Off"}`;
     this.coordsToggle.classList.toggle("active", this.showCoords);
 
-    this.opponentToggle.textContent = `Opponent: ${this.opponent === "human" ? "Human" : "Computer"}`;
-    this.opponentToggle.classList.toggle("active", this.opponent === "computer");
+    const opponentLabel = this.opponent === "human" ? "Human" : this.opponent === "computer" ? "Computer" : "Online";
+    this.opponentToggle.textContent = `Opponent: ${opponentLabel}`;
+    this.opponentToggle.classList.toggle("active", this.opponent !== "human");
     this.colorToggle.textContent = `You play: ${this.humanColor === "w" ? "White" : "Black"}`;
     this.colorToggle.classList.toggle("hidden", this.opponent !== "computer");
     this.difficultyToggle.textContent = `Difficulty: ${DIFFICULTY_LABELS[this.difficulty]}`;
     this.difficultyToggle.classList.toggle("hidden", this.opponent !== "computer");
+
+    this.onlineBanner.classList.toggle("hidden", this.opponent !== "online");
+    this.boardEl.classList.toggle("net-frozen", this.opponent === "online" && this.connectionStatus !== "connected");
+    if (this.opponent === "online") {
+      const colorLabel = this.onlineColor === "w" ? "White" : "Black";
+      const text =
+        this.connectionStatus === "waiting"
+          ? `Room ${this.net?.currentRoom ?? ""} — waiting for opponent to join…`
+          : this.connectionStatus === "connecting"
+            ? "Reconnecting…"
+            : this.connectionStatus === "disconnected"
+              ? "Connection lost — reload this page to try reconnecting."
+              : this.connectionStatus === "connected"
+                ? `Connected — you are ${colorLabel}`
+                : "";
+      this.onlineBanner.textContent = text;
+      this.onlineBanner.className = `online-banner status-${this.connectionStatus}`;
+    }
 
     for (let i = 0; i < 64; i++) {
       const square = this.boardEl.children[i] as HTMLElement;

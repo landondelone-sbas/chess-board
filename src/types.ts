@@ -40,3 +40,24 @@ export interface GameState {
   capturedPieces: Piece[];
   status: GameStatus;
 }
+
+// --- Online multiplayer wire protocol -------------------------------------
+
+export type ClientMessage =
+  | { type: "create"; token: string; color: Color }
+  | { type: "join"; room: string; token: string }
+  | { type: "rejoin"; room: string; token: string }
+  | { type: "move"; move: Move }
+  | { type: "restart" };
+
+export type ServerMessage =
+  | { type: "created"; room: string; color: Color }
+  | { type: "joined"; room: string; color: Color }
+  | { type: "opponent-joined" }
+  | { type: "opponent-move"; move: Move }
+  | { type: "opponent-restart" }
+  | { type: "opponent-left" }
+  | { type: "opponent-reconnected" }
+  | { type: "error"; message: string };
+
+export type ConnectionStatus = "idle" | "connecting" | "waiting" | "connected" | "disconnected";
