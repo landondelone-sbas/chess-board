@@ -41,10 +41,14 @@ export interface GameState {
   status: GameStatus;
 }
 
+// --- Clocks -----------------------------------------------------------------
+
+export type TimeControlId = "none" | "bullet" | "blitz" | "rapid";
+
 // --- Online multiplayer wire protocol -------------------------------------
 
 export type ClientMessage =
-  | { type: "create"; token: string; color: Color }
+  | { type: "create"; token: string; color: Color; timeControl: TimeControlId }
   | { type: "join"; room: string; token: string }
   | { type: "rejoin"; room: string; token: string }
   | { type: "move"; move: Move }
@@ -52,7 +56,7 @@ export type ClientMessage =
 
 export type ServerMessage =
   | { type: "created"; room: string; color: Color }
-  | { type: "joined"; room: string; color: Color }
+  | { type: "joined"; room: string; color: Color; timeControl: TimeControlId }
   | { type: "opponent-joined" }
   | { type: "opponent-move"; move: Move }
   | { type: "opponent-restart" }

@@ -1,4 +1,6 @@
-import type { ClientMessage, Color, ConnectionStatus, Move, ServerMessage } from "./types";
+import type { ClientMessage, Color, ConnectionStatus, Move, ServerMessage, TimeControlId } from "./types";
+
+type ConnectResult = { room: string; color: Color; timeControl?: TimeControlId };
 
 const TOKEN_KEY = "chess-net-token";
 const ROOM_KEY = "chess-net-room";
@@ -18,7 +20,7 @@ export class RoomConnection {
   private room: string | null = null;
   private color: Color | null = null;
 
-  private pendingConnect: { resolve: (v: { room: string; color: Color }) => void; reject: (e: Error) => void } | null = null;
+  private pendingConnect: { resolve: (v: ConnectResult) => void; reject: (e: Error) => void } | null = null;
 
   private moveHandler: ((move: Move) => void) | null = null;
   private opponentJoinedHandler: (() => void) | null = null;
@@ -71,15 +73,15 @@ export class RoomConnection {
     this.statusHandler = cb;
   }
 
-  createRoom(color: Color): Promise<{ room: string; color: Color }> {
-    return this.connectAndSend({ type: "create", token: this.token, color });
+  createRoom(color: Color, timeControl: TimeControlId): Promise<ConnectResult> {
+    return this.connectAndSend({ type: "create", token: this.token, color, timeControl });
   }
 
-  joinRoom(room: string): Promise<{ room: string; color: Color }> {
+  joinRoom(room: string): Promise<ConnectResult> {
     return this.connectAndSend({ type: "join", room: room.toUpperCase(), token: this.token });
   }
 
-  rejoin(): Promise<{ room: string; color: Color }> {
+  rejoin(): Promise<ConnectResult> {
     const room = sessionStorage.getItem(ROOM_KEY);
     if (!room) return Promise.reject(new Error("no-stored-session"));
     return this.connectAndSend({ type: "rejoin", room, token: this.token });
@@ -114,7 +116,7 @@ export class RoomConnection {
     }
   }
 
-  private connectAndSend(message: ClientMessage): Promise<{ room: string; color: Color }> {
+  private connectAndSend(message: ClientMessage): Promise<ConnectResult> {
     return new Promise((resolve, reject) => {
       this.pendingConnect = { resolve, reject };
       this.setStatus("connecting");
@@ -154,14 +156,23 @@ export class RoomConnection {
     }
 
     switch (msg.type) {
-      case "created":
+      case "created": {
+        this.room = msg.room;
+        this.color = msg.color;
+        sessionStorage.setItem(TOKEN_KEY, this.token);
+        sessionStorage.setItem(ROOM_KEY, msg.room);
+        this.setStatus("waiting");
+        this.pendingConnect?.resolve({ room: msg.room, color: msg.color });
+        this.pendingConnect = null;
+        break;
+      }
       case "joined": {
         this.room = msg.room;
         this.color = msg.color;
         sessionStorage.setItem(TOKEN_KEY, this.token);
         sessionStorage.setItem(ROOM_KEY, msg.room);
-        this.setStatus(msg.type === "created" ? "waiting" : "connected");
-        this.pendingConnect?.resolve({ room: msg.room, color: msg.color });
+        this.setStatus("connected");
+        this.pendingConnect?.resolve({ room: msg.room, color: msg.color, timeControl: msg.timeControl });
         this.pendingConnect = null;
         break;
       }

@@ -150,6 +150,47 @@ body {
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
 }
 
+.board-column {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.clock {
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 1.3rem;
+  font-weight: 700;
+  padding: 4px 16px;
+  border-radius: 6px;
+  border: 1px solid #55503f;
+  background: rgba(0, 0, 0, 0.25);
+  color: #cfc9bd;
+  min-width: 3.4em;
+  text-align: center;
+}
+
+.clock.hidden {
+  display: none;
+}
+
+.clock.active {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: rgba(201, 162, 39, 0.12);
+}
+
+.clock.low-time {
+  border-color: #e85d3d;
+  color: #e85d3d;
+}
+
+.clock.flagged {
+  border-color: #e85d3d;
+  color: #fdfdfd;
+  background: rgba(232, 93, 61, 0.3);
+}
+
 .square {
   display: flex;
   align-items: center;

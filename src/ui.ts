@@ -1,4 +1,4 @@
-import type { Color, ConnectionStatus, GameState, Move, Piece, PieceType } from "./types";
+import type { Color, ConnectionStatus, GameState, Move, Piece, PieceType, TimeControlId } from "./types";
 import { fileOf, rankOf, toAlgebraic, opponent } from "./board";
 import { createInitialState, getLegalMoves, makeMove } from "./engine";
 import { findKing, generatePseudoLegalMoves, getAttackers } from "./moveGenerator";
@@ -11,6 +11,35 @@ const OPPONENT_MODES = ["human", "computer", "online"] as const;
 type OpponentMode = (typeof OPPONENT_MODES)[number];
 const WS_URL = import.meta.env.VITE_WS_URL;
 const ONLINE_STATE_KEY = "chess-net-state";
+
+interface TimeControl {
+  id: TimeControlId;
+  label: string;
+  baseSeconds: number;
+  incrementSeconds: number;
+}
+
+// Nicknames/thresholds per FIDE convention: Bullet <3min, Blitz 3-10min, Rapid 10-60min.
+const TIME_CONTROLS: TimeControl[] = [
+  { id: "none", label: "No Clock", baseSeconds: 0, incrementSeconds: 0 },
+  { id: "bullet", label: "Bullet · 1 min", baseSeconds: 60, incrementSeconds: 0 },
+  { id: "blitz", label: "Blitz · 5 min", baseSeconds: 300, incrementSeconds: 0 },
+  { id: "rapid", label: "Rapid · 10 min", baseSeconds: 600, incrementSeconds: 0 },
+];
+
+interface PersistedOnlineState {
+  state: GameState;
+  clockMs: { w: number; b: number } | null;
+  flagged: Color | null;
+  timeControlIndex: number;
+}
+
+function formatClock(ms: number): string {
+  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
 
 const PIECE_GLYPHS: Record<Piece["color"], Record<PieceType, string>> = {
   w: { k: "♔", q: "♕", r: "♖", b: "♗", n: "♘", p: "♙" },
@@ -39,6 +68,12 @@ export class ChessUI {
   private difficulty = 1; // index into DIFFICULTY_LABELS/DIFFICULTY_DEPTHS
   private thinking = false;
 
+  private timeControlIndex = 0; // index into TIME_CONTROLS
+  private clockMs: { w: number; b: number } | null = null;
+  private flagged: Color | null = null; // color whose clock hit zero
+  private clockTickHandle: number | null = null;
+  private lastTickAt = 0;
+
   private net: RoomConnection | null = null;
   private onlineColor: Color | null = null;
   private onlinePreferredColor: Color = "w";
@@ -59,6 +94,9 @@ export class ChessUI {
   private opponentToggle!: HTMLButtonElement;
   private colorToggle!: HTMLButtonElement;
   private difficultyToggle!: HTMLButtonElement;
+  private clockToggle!: HTMLButtonElement;
+  private clockBlackEl!: HTMLElement;
+  private clockWhiteEl!: HTMLElement;
   private promotionModal!: HTMLElement;
   private promotionOptions!: HTMLElement;
   private onlineModal!: HTMLElement;
@@ -88,11 +126,16 @@ export class ChessUI {
             <button class="toggle-btn" id="opponent-toggle" type="button"></button>
             <button class="toggle-btn" id="color-toggle" type="button"></button>
             <button class="toggle-btn" id="difficulty-toggle" type="button"></button>
+            <button class="toggle-btn" id="clock-toggle" type="button"></button>
           </div>
         </header>
         <div class="game-area">
           <div class="graveyard" id="captured-black" aria-label="Pieces captured by White"></div>
-          <div class="board" id="board"></div>
+          <div class="board-column">
+            <div class="clock clock-black hidden" id="clock-black"></div>
+            <div class="board" id="board"></div>
+            <div class="clock clock-white hidden" id="clock-white"></div>
+          </div>
           <aside class="side-panel">
             <div class="graveyard" id="captured-white" aria-label="Pieces captured by Black"></div>
             <div class="coach" id="coach"></div>
@@ -129,6 +172,9 @@ export class ChessUI {
     this.opponentToggle = this.root.querySelector("#opponent-toggle")!;
     this.colorToggle = this.root.querySelector("#color-toggle")!;
     this.difficultyToggle = this.root.querySelector("#difficulty-toggle")!;
+    this.clockToggle = this.root.querySelector("#clock-toggle")!;
+    this.clockBlackEl = this.root.querySelector("#clock-black")!;
+    this.clockWhiteEl = this.root.querySelector("#clock-white")!;
     this.promotionModal = this.root.querySelector("#promotion-modal")!;
     this.promotionOptions = this.root.querySelector("#promotion-options")!;
     this.onlineModal = this.root.querySelector("#online-modal")!;
@@ -171,6 +217,11 @@ export class ChessUI {
       this.render();
     });
 
+    this.clockToggle.addEventListener("click", () => {
+      this.timeControlIndex = (this.timeControlIndex + 1) % TIME_CONTROLS.length;
+      this.startNewGame();
+    });
+
     for (let i = 0; i < 64; i++) {
       const square = document.createElement("div");
       square.className = "square";
@@ -211,9 +262,50 @@ export class ChessUI {
     this.selected = null;
     this.legalMoves = [];
     this.thinking = false;
+    this.flagged = null;
+    const tc = TIME_CONTROLS[this.timeControlIndex];
+    this.clockMs = tc.baseSeconds > 0 ? { w: tc.baseSeconds * 1000, b: tc.baseSeconds * 1000 } : null;
+    this.stopClock();
+    if (this.clockMs) this.startClock();
     if (this.opponent === "online") this.persistOnlineState();
     this.render();
     this.maybeTriggerAiMove();
+  }
+
+  private startClock() {
+    this.stopClock();
+    this.lastTickAt = performance.now();
+    this.clockTickHandle = window.setInterval(() => this.tickClock(), 200);
+  }
+
+  private stopClock() {
+    if (this.clockTickHandle !== null) {
+      clearInterval(this.clockTickHandle);
+      this.clockTickHandle = null;
+    }
+  }
+
+  private tickClock() {
+    if (!this.clockMs || this.flagged) return;
+    if (this.state.status === "checkmate" || this.state.status === "stalemate") {
+      this.stopClock();
+      return;
+    }
+    const now = performance.now();
+    const elapsed = now - this.lastTickAt;
+    this.lastTickAt = now;
+
+    // Pause the clock while an online game isn't actively connected, rather than
+    // letting a dropped connection burn someone's time.
+    if (this.opponent === "online" && this.connectionStatus !== "connected") return;
+
+    const turn = this.state.turn;
+    this.clockMs[turn] = Math.max(0, this.clockMs[turn] - elapsed);
+    if (this.clockMs[turn] === 0) {
+      this.flagged = turn;
+      this.stopClock();
+    }
+    this.render();
   }
 
   private setOpponentMode(mode: OpponentMode) {
@@ -235,6 +327,9 @@ export class ChessUI {
   }
 
   private enterOnlineMode() {
+    this.stopClock();
+    this.clockMs = null;
+    this.flagged = null;
     this.net = new RoomConnection(WS_URL);
     this.wireNetHandlers(this.net);
     this.onlineError = null;
@@ -244,12 +339,19 @@ export class ChessUI {
       this.showOnlineModal();
       this.net
         .rejoin()
-        .then(({ color }) => {
+        .then(({ color, timeControl }) => {
           this.onlineColor = color;
           const saved = sessionStorage.getItem(ONLINE_STATE_KEY);
-          this.state = saved ? (JSON.parse(saved) as GameState) : createInitialState();
+          const restored = saved ? (JSON.parse(saved) as PersistedOnlineState) : null;
+          this.state = restored?.state ?? createInitialState();
+          this.clockMs = restored?.clockMs ?? null;
+          this.flagged = restored?.flagged ?? null;
+          this.timeControlIndex =
+            restored?.timeControlIndex ?? Math.max(0, TIME_CONTROLS.findIndex((tc) => tc.id === timeControl));
           this.selected = null;
           this.legalMoves = [];
+          this.stopClock();
+          if (this.clockMs && !this.flagged) this.startClock();
           this.hideOnlineModal();
           this.render();
         })
@@ -280,6 +382,7 @@ export class ChessUI {
       this.state = makeMove(this.state, move);
       this.selected = null;
       this.legalMoves = [];
+      this.applyClockIncrement(move);
       this.persistOnlineState();
       this.render();
     });
@@ -291,7 +394,15 @@ export class ChessUI {
   }
 
   private persistOnlineState() {
-    sessionStorage.setItem(ONLINE_STATE_KEY, JSON.stringify(this.state));
+    sessionStorage.setItem(
+      ONLINE_STATE_KEY,
+      JSON.stringify({
+        state: this.state,
+        clockMs: this.clockMs,
+        flagged: this.flagged,
+        timeControlIndex: this.timeControlIndex,
+      })
+    );
   }
 
   private showOnlineModal(roomCodeInputValue = "") {
@@ -343,6 +454,10 @@ export class ChessUI {
         <span>You'll play:</span>
         <button type="button" class="toggle-btn" id="online-color-toggle">${this.onlinePreferredColor === "w" ? "White" : "Black"}</button>
       </div>
+      <div class="online-row">
+        <span>Time control:</span>
+        <button type="button" class="toggle-btn" id="online-clock-toggle">${TIME_CONTROLS[this.timeControlIndex].label}</button>
+      </div>
       <button type="button" class="primary-btn" id="online-create-btn">Create Game</button>
       <hr />
       <div class="online-row">
@@ -357,11 +472,16 @@ export class ChessUI {
       this.renderOnlinePanel(roomCodeInputValue);
     });
 
+    body.querySelector("#online-clock-toggle")!.addEventListener("click", () => {
+      this.timeControlIndex = (this.timeControlIndex + 1) % TIME_CONTROLS.length;
+      this.renderOnlinePanel(roomCodeInputValue);
+    });
+
     body.querySelector("#online-create-btn")!.addEventListener("click", () => {
       this.onlineStep = "creating";
       this.onlineError = null;
       this.renderOnlinePanel();
-      this.net!.createRoom(this.onlinePreferredColor)
+      this.net!.createRoom(this.onlinePreferredColor, TIME_CONTROLS[this.timeControlIndex].id)
         .then(({ color }) => {
           this.onlineColor = color;
           this.onlineStep = "waiting";
@@ -382,8 +502,12 @@ export class ChessUI {
       this.onlineError = null;
       this.renderOnlinePanel();
       this.net!.joinRoom(code)
-        .then(({ color }) => {
+        .then(({ color, timeControl }) => {
           this.onlineColor = color;
+          if (timeControl) {
+            const idx = TIME_CONTROLS.findIndex((tc) => tc.id === timeControl);
+            if (idx >= 0) this.timeControlIndex = idx;
+          }
           this.startNewGame();
           this.hideOnlineModal();
         })
@@ -397,6 +521,7 @@ export class ChessUI {
 
   private onSquareClick(index: number) {
     if (this.state.status === "checkmate" || this.state.status === "stalemate") return;
+    if (this.flagged) return;
     if (this.thinking) return;
     if (this.opponent === "computer" && this.state.turn !== this.humanColor) return;
     if (this.opponent === "online" && (this.connectionStatus !== "connected" || this.state.turn !== this.onlineColor)) return;
@@ -442,6 +567,7 @@ export class ChessUI {
     this.state = makeMove(this.state, move);
     this.selected = null;
     this.legalMoves = [];
+    this.applyClockIncrement(move);
     if (this.opponent === "online") {
       this.net?.sendMove(move);
       this.persistOnlineState();
@@ -450,17 +576,32 @@ export class ChessUI {
     this.maybeTriggerAiMove();
   }
 
+  private applyClockIncrement(move: Move) {
+    if (!this.clockMs) return;
+    const increment = TIME_CONTROLS[this.timeControlIndex].incrementSeconds;
+    if (increment > 0) this.clockMs[move.piece.color] += increment * 1000;
+  }
+
   private maybeTriggerAiMove() {
     if (this.opponent !== "computer") return;
     if (this.state.status === "checkmate" || this.state.status === "stalemate") return;
+    if (this.flagged) return;
     if (this.state.turn === this.humanColor) return;
 
     this.thinking = true;
     this.render();
 
     setTimeout(() => {
+      if (this.flagged) {
+        this.thinking = false;
+        this.render();
+        return;
+      }
       const move = chooseComputerMove(this.state, DIFFICULTY_DEPTHS[this.difficulty]);
-      if (move) this.state = makeMove(this.state, move);
+      if (move) {
+        this.state = makeMove(this.state, move);
+        this.applyClockIncrement(move);
+      }
       this.thinking = false;
       this.selected = null;
       this.legalMoves = [];
@@ -484,6 +625,23 @@ export class ChessUI {
     this.colorToggle.classList.toggle("hidden", this.opponent !== "computer");
     this.difficultyToggle.textContent = `Difficulty: ${DIFFICULTY_LABELS[this.difficulty]}`;
     this.difficultyToggle.classList.toggle("hidden", this.opponent !== "computer");
+
+    this.clockToggle.textContent = `Clock: ${TIME_CONTROLS[this.timeControlIndex].label}`;
+    this.clockToggle.classList.toggle("active", this.timeControlIndex !== 0);
+    this.clockToggle.classList.toggle("hidden", this.opponent === "online");
+
+    this.clockBlackEl.classList.toggle("hidden", !this.clockMs);
+    this.clockWhiteEl.classList.toggle("hidden", !this.clockMs);
+    if (this.clockMs) {
+      this.clockBlackEl.textContent = formatClock(this.clockMs.b);
+      this.clockWhiteEl.textContent = formatClock(this.clockMs.w);
+      this.clockBlackEl.classList.toggle("active", turn === "b" && !this.flagged);
+      this.clockWhiteEl.classList.toggle("active", turn === "w" && !this.flagged);
+      this.clockBlackEl.classList.toggle("low-time", this.clockMs.b < 10000);
+      this.clockWhiteEl.classList.toggle("low-time", this.clockMs.w < 10000);
+      this.clockBlackEl.classList.toggle("flagged", this.flagged === "b");
+      this.clockWhiteEl.classList.toggle("flagged", this.flagged === "w");
+    }
 
     this.onlineBanner.classList.toggle("hidden", this.opponent !== "online");
     this.boardEl.classList.toggle("net-frozen", this.opponent === "online" && this.connectionStatus !== "connected");
@@ -530,7 +688,10 @@ export class ChessUI {
     }
 
     const colorName = (c: "w" | "b") => (c === "w" ? "White" : "Black");
-    if (this.thinking) {
+    if (this.flagged) {
+      this.statusEl.textContent = `${colorName(this.flagged)} ran out of time — ${colorName(opponent(this.flagged))} wins!`;
+      this.statusEl.className = "status status-end";
+    } else if (this.thinking) {
       this.statusEl.textContent = "Computer is thinking…";
       this.statusEl.className = "status status-thinking";
     } else if (status === "checkmate") {

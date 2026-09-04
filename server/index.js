@@ -6,7 +6,7 @@ const ROOM_CODE_LENGTH = 5;
 const IDLE_ROOM_TTL_MS = 10 * 60 * 1000; // 10 minutes with no connected sockets
 
 /** @typedef {{ socket: import("ws").WebSocket | null, token: string }} Seat */
-/** @typedef {{ white: Seat | null, black: Seat | null, emptySince: number | null }} Room */
+/** @typedef {{ white: Seat | null, black: Seat | null, emptySince: number | null, timeControl: string }} Room */
 
 /** @type {Map<string, Room>} */
 const rooms = new Map();
@@ -68,7 +68,7 @@ wss.on("connection", (socket) => {
     }
 
     if (msg.type === "create") {
-      const room = { white: null, black: null, emptySince: null };
+      const room = { white: null, black: null, emptySince: null, timeControl: msg.timeControl ?? "none" };
       const code = generateRoomCode();
       setSeat(room, msg.color, { socket, token: msg.token });
       rooms.set(code, room);
@@ -96,7 +96,7 @@ wss.on("connection", (socket) => {
       setSeat(room, joinColor, { socket, token: msg.token });
       room.emptySince = null;
       meta = { room: msg.room, color: joinColor };
-      send(socket, { type: "joined", room: msg.room, color: joinColor });
+      send(socket, { type: "joined", room: msg.room, color: joinColor, timeControl: room.timeControl });
       send(seatFor(room, takenColor)?.socket, { type: "opponent-joined" });
       return;
     }
@@ -115,7 +115,7 @@ wss.on("connection", (socket) => {
       setSeat(room, color, { socket, token: msg.token });
       room.emptySince = null;
       meta = { room: msg.room, color };
-      send(socket, { type: "joined", room: msg.room, color });
+      send(socket, { type: "joined", room: msg.room, color, timeControl: room.timeControl });
       send(seatFor(room, otherColor(color))?.socket, { type: "opponent-reconnected" });
       return;
     }
