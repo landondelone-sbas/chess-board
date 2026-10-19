@@ -10,7 +10,7 @@ import { WebSocketServer } from "ws";
 //   RELAY_MAX_ROOMS_PER_IP        rooms alive at once from one address (10)
 //   RELAY_MAX_CONNECTIONS_PER_IP  open connections from one address (20); twice this many, counting ones being
 //                                 turned away, and further connections are rejected before the handshake finishes
-//   RELAY_RATE_LIMIT_MESSAGES     messages, pings and pongs per connection per 10 seconds (30)
+//   RELAY_RATE_LIMIT_MESSAGES     messages, pings and pongs per connection per 10 seconds (30); one over it is dropped
 //   RELAY_MAX_BUFFERED_BYTES      unsent bytes allowed for one peer before it is cut off (65536)
 //   RELAY_HEARTBEAT_MS            how often every connection is pinged; one that misses a pong is dropped (30000; keep
 //                                 it above about 400 or each pong uses up the rate limit)
@@ -23,6 +23,12 @@ import { WebSocketServer } from "ws";
 //                                 the X-Forwarded-For header and the address the limits count; at most 20 lines per 10 s)
 // Real traffic is tiny (a move is about 200 bytes and a game sends a few messages a second at most), so the limits
 // are generous for players and cheap protection against abuse.
+//
+// First deploy behind a proxy (Render): the right RELAY_TRUST_PROXY_HOPS is not known until the real X-Forwarded-For
+// header has been seen. The connection log shows it, and counted-as= must be the player's own address. Until it is, run
+// with RELAY_MAX_CONNECTIONS_PER_IP=1000 and RELAY_MAX_ROOMS_PER_IP=1000, so a wrong hop count cannot lock players out
+// by putting them all under the proxy's address. Read the first log lines, set RELAY_TRUST_PROXY_HOPS so counted-as=
+// is right, then lower the two limits again (or delete the two variables to get the defaults above).
 const PORT = process.env.PORT || 8787;
 const HOST = process.env.RELAY_HOST || undefined;
 const limit = (name, fallback) => (Number(process.env[name]) > 0 ? Number(process.env[name]) : fallback);
@@ -49,17 +55,51 @@ const MAX_TOKEN_LENGTH = 64;
 const VALID_COLORS = new Set(["w", "b"]);
 const VALID_TIME_CONTROLS = new Set(["none", "bullet", "blitz", "rapid"]); // matches TimeControlId in src/types.ts
 const VALID_PROMOTIONS = new Set(["q", "r", "b", "n"]); // matches PROMOTION_CHOICES in src/moveGenerator.ts
+const VALID_PIECE_TYPES = new Set(["p", "n", "b", "r", "q", "k"]); // matches PieceType in src/types.ts
+const MAX_NOTATION_LENGTH = 16;
+const NOTATION_PATTERN = /^[A-Za-z0-9=+#-]*$/; // "e4", "exd5=Q#", "O-O-O+"
 
 const isToken = (value) => typeof value === "string" && value.length > 0 && value.length <= MAX_TOKEN_LENGTH;
 const isRoomCode = (value) => typeof value === "string" && value.length === ROOM_CODE_LENGTH;
 const isSquare = (n) => Number.isInteger(n) && n >= 0 && n < 64;
+const isPlainObject = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
 
-// The relay cannot judge whether a move is legal, so it passes on only the three fields a move is made of and nothing
-// else: the receiving client checks the move against the rules itself. Returns null for anything that is not a move.
-function toWireMove(m) {
-  if (m === null || typeof m !== "object" || Array.isArray(m) || !isSquare(m.from) || !isSquare(m.to)) return null;
-  if (m.promotion === undefined) return { from: m.from, to: m.to };
-  return VALID_PROMOTIONS.has(m.promotion) ? { from: m.from, to: m.to, promotion: m.promotion } : null;
+// A piece as { type, color } rebuilt from the two checked values, or null if it is not one.
+function cleanPiece(p) {
+  return isPlainObject(p) && VALID_PIECE_TYPES.has(p.type) && VALID_COLORS.has(p.color) ? { type: p.type, color: p.color } : null;
+}
+
+// The relay cannot judge whether a move is legal, but it can make sure that what it passes on is a move and nothing
+// else. Every field is checked and the move is rebuilt from the checked values, so no extra field, odd type or markup
+// gets through. Players on an older version of the site read the whole move, so all of its fields are kept; the
+// current site only uses the squares and the promotion piece, and checks them against the rules itself.
+// Returns null for anything that is not a well-formed move.
+function cleanMove(m) {
+  if (!isPlainObject(m) || !isSquare(m.from) || !isSquare(m.to)) return null;
+  const piece = cleanPiece(m.piece);
+  if (!piece) return null;
+  const move = { from: m.from, to: m.to, piece, capturedPiece: null, notation: "" };
+  if (m.capturedPiece !== null && m.capturedPiece !== undefined) {
+    move.capturedPiece = cleanPiece(m.capturedPiece);
+    if (!move.capturedPiece) return null;
+  }
+  if (m.promotion !== undefined) {
+    if (!VALID_PROMOTIONS.has(m.promotion)) return null;
+    move.promotion = m.promotion;
+  }
+  if (m.isEnPassant !== undefined) {
+    if (typeof m.isEnPassant !== "boolean") return null;
+    move.isEnPassant = m.isEnPassant;
+  }
+  if (m.isCastle !== undefined) {
+    if (m.isCastle !== "K" && m.isCastle !== "Q") return null;
+    move.isCastle = m.isCastle;
+  }
+  if (m.notation !== undefined) {
+    if (typeof m.notation !== "string" || m.notation.length > MAX_NOTATION_LENGTH || !NOTATION_PATTERN.test(m.notation)) return null;
+    move.notation = m.notation;
+  }
+  return move;
 }
 
 /** @typedef {{ socket: import("ws").WebSocket | null, token: string }} Seat */
@@ -84,14 +124,14 @@ function ipv6Prefix(ip) {
 
 // The key the limits count for an address, or null if the text is not an address. Accepts the forms proxies produce:
 // a port after IPv4 ("1.2.3.4:5555") or in brackets after IPv6 ("[2001:db8::1]:443"), and IPv4 seen through an IPv6
-// socket ("::ffff:1.2.3.4"). A zone suffix ("fe80::1%eth0") is accepted by net.isIPv6 and sits after the /64, so it
-// needs no handling.
+// socket ("::ffff:1.2.3.4"). A zone suffix ("fe80::1%eth0") is dropped before anything is counted: net.isIPv6 accepts a
+// zone that itself contains colons ("1::2%a:b:c:d:e:f:g:h:i"), which would throw off the count of address groups below.
 function addressKey(raw) {
   let ip = String(raw ?? "").trim();
   const bracketed = /^\[([^\]]+)\](?::\d+)?$/.exec(ip);
   if (bracketed) ip = bracketed[1];
   else if (/^\d{1,3}(\.\d{1,3}){3}:\d+$/.test(ip)) ip = ip.slice(0, ip.lastIndexOf(":"));
-  ip = ip.replace(/^::ffff:/i, "");
+  ip = ip.replace(/%.*$/, "").replace(/^::ffff:/i, "");
   if (net.isIPv4(ip)) return ip;
   return net.isIPv6(ip) ? ipv6Prefix(ip) : null;
 }
@@ -102,12 +142,19 @@ function addressKey(raw) {
 // If the header is missing, too short or not an address, fall back to the socket address.
 function clientIp(req) {
   if (req.relayAddress) return req.relayAddress; // worked out once per request
-  const direct = addressKey(req.socket.remoteAddress) ?? "unknown";
+  let direct = "unknown";
   let found = direct;
-  if (TRUSTED_PROXY_HOPS > 0) {
-    const entries = String(req.headers["x-forwarded-for"] ?? "").split(",").map((entry) => entry.trim()).filter(Boolean);
-    const candidate = entries.length >= TRUSTED_PROXY_HOPS ? addressKey(entries[entries.length - TRUSTED_PROXY_HOPS]) : null;
-    if (candidate) found = candidate;
+  try {
+    direct = addressKey(req.socket.remoteAddress) ?? "unknown";
+    found = direct;
+    if (TRUSTED_PROXY_HOPS > 0) {
+      const entries = String(req.headers["x-forwarded-for"] ?? "").split(",").map((entry) => entry.trim()).filter(Boolean);
+      const candidate = entries.length >= TRUSTED_PROXY_HOPS ? addressKey(entries[entries.length - TRUSTED_PROXY_HOPS]) : null;
+      if (candidate) found = candidate;
+    }
+  } catch {
+    // The header is written by whoever connects. Whatever is in it, it must never take the relay down: count by socket address.
+    found = direct;
   }
   req.relayAddress = found;
   return found;
@@ -283,6 +330,9 @@ wss.on("connection", (socket, req) => {
     else connectionsByIp.set(ip, left);
   });
   if (openFromIp > MAX_CONNECTIONS_PER_IP) {
+    // Turned away: all it may do now is finish the close handshake. Any frame it sends instead is a flood, and every
+    // frame read is time taken from everyone else, so the connection is dropped on the first one.
+    for (const event of ["message", "ping", "pong"]) socket.on(event, () => socket.terminate());
     closeWithReason(socket, 1013, "too-many-connections");
     return;
   }
@@ -323,7 +373,7 @@ wss.on("connection", (socket, req) => {
 
   socket.on("message", (raw) => {
     if (tooFast()) {
-      closeWithReason(socket, 1008, "rate-limit");
+      socket.terminate(); // a polite close would keep reading the rest of the flood for the whole grace period
       return;
     }
 
@@ -423,7 +473,7 @@ wss.on("connection", (socket, req) => {
     const peer = seatFor(room, otherColor(meta.color))?.socket;
 
     if (msg.type === "move") {
-      const move = toWireMove(msg.move);
+      const move = cleanMove(msg.move);
       if (!move) return;
       send(peer, { type: "opponent-move", move });
     } else if (msg.type === "restart") {

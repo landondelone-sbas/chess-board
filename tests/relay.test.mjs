@@ -29,6 +29,13 @@ import {
   timeToAnswer,
   tryAdmit,
 } from "./relayHarness.mjs";
+import { createInitialState, getAllLegalMoves } from "../src/engine.ts";
+import { stateFromFen } from "./fen.mjs";
+
+// A well-formed move, as the site sends it (the relay checks every field).
+const PAWN = { type: "p", color: "w" };
+const E4 = { from: 12, to: 28, piece: PAWN, capturedPiece: null, notation: "" };
+const BLACK_E5 = { from: 52, to: 36, piece: { type: "p", color: "b" }, capturedPiece: null, notation: "" };
 
 test("ignores JSON frames that are not objects", { timeout: 30000 }, async (t) => {
   const relay = await startRelay(t);
@@ -68,7 +75,7 @@ test("survives hostile frames: odd types, bad bytes, oversize and deeply nested 
   const relay = await startRelay(t);
   const hostile = [
     ["type is an object", () => JSON.stringify({ type: { x: 1 } })],
-    ["move before joining", () => JSON.stringify({ type: "move", move: { from: 1, to: 2 } })],
+    ["move before joining", () => JSON.stringify({ type: "move", move: E4 })],
     ["prototype-style key", () => '{"type":"create","__proto__":{"polluted":true},"color":"w","token":"t"}'],
     ["text frame that is not valid UTF-8", () => Buffer.from([0xc3, 0x28, 0xa0, 0xa1])],
     ["oversize frame (10 KB)", () => "x".repeat(10 * 1024)],
@@ -83,41 +90,69 @@ test("survives hostile frames: odd types, bad bytes, oversize and deeply nested 
   }
 });
 
-test("drops moves that are not two real board squares, and delivers only the valid one", { timeout: 30000 }, async (t) => {
-  const relay = await startRelay(t);
+test("drops anything that is not a well-formed move, and delivers only the valid one", { timeout: 30000 }, async (t) => {
+  const relay = await startRelay(t, { RELAY_RATE_LIMIT_MESSAGES: "1000" });
   const { host, room } = await createGame(relay);
   const guest = await joinGame(relay, room);
-  const badMoves = [undefined, null, "text", 5, [], {}, { from: 12 }, { from: 12, to: 4294967294 }, { from: -1, to: 5 }, { from: "12", to: "28" }, { from: 1.5, to: 2 }];
+  const badMoves = [
+    undefined, null, "text", 5, [], {},
+    // squares
+    { ...E4, from: undefined }, { ...E4, to: 4294967294 }, { ...E4, from: -1 }, { ...E4, from: "12", to: "28" }, { ...E4, from: 1.5 },
+    // the moving piece
+    { from: 12, to: 28 }, { ...E4, piece: null }, { ...E4, piece: "p" }, { ...E4, piece: ["p", "w"] }, { ...E4, piece: { type: "x", color: "w" } },
+    { ...E4, piece: { type: "p", color: "z" } }, { ...E4, piece: { type: "p" } },
+    // the captured piece
+    { ...E4, capturedPiece: "r" }, { ...E4, capturedPiece: 5 }, { ...E4, capturedPiece: [] }, { ...E4, capturedPiece: { type: "k" } }, { ...E4, capturedPiece: { type: "q", color: "?" } },
+    // flags and notation
+    { ...E4, isEnPassant: "yes" }, { ...E4, isEnPassant: 1 }, { ...E4, isEnPassant: null },
+    { ...E4, isCastle: "X" }, { ...E4, isCastle: true }, { ...E4, isCastle: null }, { ...E4, isCastle: "k" },
+    { ...E4, notation: "<img src=x onerror=alert(1)>" }, { ...E4, notation: "x".repeat(17) }, { ...E4, notation: 5 }, { ...E4, notation: null }, { ...E4, notation: "a b" }, { ...E4, notation: "é" },
+    // promotion: only q, r, b and n are pieces a pawn can become
+    ...["k", "p", "x", "queen", "", null, 5, ["q"], { q: 1 }].map((promotion) => ({ ...E4, promotion })),
+  ];
   for (const move of badMoves) sendJson(host, { type: "move", move });
-  sendJson(host, { type: "move", move: { from: 12, to: 28 } }); // the barrier: it arrives after any wrongly forwarded one
+  sendJson(host, { type: "move", move: E4 }); // the barrier: it arrives after any wrongly forwarded one
   assert.ok(await eventually(() => got(guest, (m) => m.type === "opponent-move" && m.move?.to === 28)), "the valid move must arrive");
   const delivered = guest.inbox.filter((m) => m.type === "opponent-move");
   assert.equal(delivered.length, 1, `only the valid move may be delivered, got ${JSON.stringify(delivered)}`);
+  assert.deepEqual(delivered[0].move, E4);
 });
 
-test("passes on only a move's squares and promotion piece, nothing else a sender attaches", { timeout: 30000 }, async (t) => {
+test("passes on a move's own fields and nothing else a sender attaches", { timeout: 30000 }, async (t) => {
   // Raised size cap so the hostile extras (a huge nested value, markup, padding) actually reach the relay.
   const relay = await startRelay(t, { RELAY_MAX_PAYLOAD_BYTES: String(4 * 1024 * 1024), RELAY_RATE_LIMIT_MESSAGES: "1000" });
   const { host, room } = await createGame(relay);
   const guest = await joinGame(relay, room);
-  const extras = '"piece":{"type":"q","color":"b"},"capturedPiece":{"type":"k","color":"w"},"isCastle":"K","notation":"<img src=x onerror=alert(1)>","pad":"' + "x".repeat(3000) + '","extra":' + nest(20000);
-  host.ws.send('{"type":"move","move":{"from":12,"to":28,' + extras + "}}");
-  host.ws.send('{"type":"move","move":{"from":52,"to":60,"promotion":"n",' + extras + "}}");
+  const hostile = '"pad":"' + "x".repeat(3000) + '","extra":' + nest(20000) + ',"__proto__":{"polluted":true},"script":"<script>alert(1)</script>"';
+  host.ws.send('{"type":"move","move":{"from":12,"to":28,"piece":{"type":"p","color":"w","extra":1},"capturedPiece":null,"notation":"e4",' + hostile + "}}");
+  host.ws.send('{"type":"move","move":{"from":52,"to":61,"piece":{"type":"p","color":"w"},"capturedPiece":{"type":"r","color":"b","junk":true},"promotion":"n","isEnPassant":false,"isCastle":"Q","notation":"exf8=N+",' + hostile + "}}");
   assert.ok(await eventually(() => guest.inbox.filter((m) => m.type === "opponent-move").length === 2), `both moves must arrive\n${relay.why()}`);
   const delivered = guest.inbox.filter((m) => m.type === "opponent-move").map((m) => m.move);
-  assert.deepEqual(delivered, [{ from: 12, to: 28 }, { from: 52, to: 60, promotion: "n" }], "only the squares and the promotion piece may be passed on");
+  assert.deepEqual(delivered, [
+    { from: 12, to: 28, piece: { type: "p", color: "w" }, capturedPiece: null, notation: "e4" },
+    { from: 52, to: 61, piece: { type: "p", color: "w" }, capturedPiece: { type: "r", color: "b" }, promotion: "n", isEnPassant: false, isCastle: "Q", notation: "exf8=N+" },
+  ]);
   assertAlive(relay, "hostile move extras");
 });
 
-test("drops a move whose promotion piece is not one a pawn can become", { timeout: 30000 }, async (t) => {
-  const relay = await startRelay(t);
+test("relays every legal move of real positions exactly as the engine made it, so older versions of the site keep working", { timeout: 60000 }, async (t) => {
+  const positions = [
+    createInitialState(),
+    stateFromFen("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq -"), // castling, captures, pins
+    stateFromFen("4k3/P7/8/8/8/8/8/4K3 w - -"), // promotion
+    stateFromFen("4k3/8/8/2pP4/8/8/8/4K3 w - c6"), // en passant
+    stateFromFen("r3k2r/8/8/8/8/8/8/R3K2R b KQkq -"), // black castling
+  ];
+  const moves = JSON.parse(JSON.stringify(positions.flatMap((state) => getAllLegalMoves(state, state.turn)))); // as it goes over the wire
+  for (const [what, found] of [["castling", moves.some((m) => m.isCastle)], ["en passant", moves.some((m) => m.isEnPassant)], ["promotion", moves.some((m) => m.promotion)], ["capture", moves.some((m) => m.capturedPiece)]]) {
+    assert.ok(found, `test setup: the positions must include ${what}`);
+  }
+  const relay = await startRelay(t, { RELAY_RATE_LIMIT_MESSAGES: "1000000" });
   const { host, room } = await createGame(relay);
   const guest = await joinGame(relay, room);
-  for (const promotion of ["k", "p", "x", "queen", "", null, 5, ["q"], { q: 1 }]) sendJson(host, { type: "move", move: { from: 52, to: 60, promotion } });
-  for (const promotion of ["q", "r", "b", "n"]) sendJson(host, { type: "move", move: { from: 52, to: 60, promotion } });
-  assert.ok(await eventually(() => guest.inbox.filter((m) => m.type === "opponent-move").length >= 4), "the four real promotions must arrive");
-  await assertStillServing(relay, "bad promotion pieces"); // the valid ones were sent last, so nothing wrong can still be on its way
-  assert.deepEqual(guest.inbox.filter((m) => m.type === "opponent-move").map((m) => m.move.promotion), ["q", "r", "b", "n"]);
+  for (const move of moves) sendJson(host, { type: "move", move });
+  assert.ok(await eventually(() => guest.inbox.filter((m) => m.type === "opponent-move").length >= moves.length, 10000), `all ${moves.length} moves must arrive`);
+  assert.deepEqual(guest.inbox.filter((m) => m.type === "opponent-move").map((m) => m.move), moves);
 });
 
 test("refuses frames over the size cap and closes that connection, but accepts normal-sized ones", { timeout: 30000 }, async (t) => {
@@ -256,6 +291,56 @@ test("a flood of ping frames from one connection does not slow the relay down fo
   assertAlive(relay, "ping flood");
 });
 
+// n masked frames with no payload (6 bytes each): 0x81 is a text frame, 0x89 a ping, 0x8a a pong.
+function frames(kind, n) {
+  const first = { text: 0x81, ping: 0x89, pong: 0x8a }[kind];
+  const buffer = Buffer.alloc(n * 6);
+  for (let i = 0; i < n; i++) buffer.writeUInt16BE((first << 8) | 0x80, i * 6);
+  return buffer;
+}
+
+test("a flood of text frames from one connection is dropped at once, not read to the end", { timeout: 60000 }, async (t) => {
+  const relay = await startRelay(t); // default limits
+  const flooder = await rawUpgrade(relay.port);
+  t.after(() => flooder.socket.destroy());
+  assert.match(flooder.status, / 101 /, "the flooding connection must get in first");
+  flooder.socket.write(frames("text", 500000)); // 3 MB
+  // Dropped at once, not asked politely to close (which a client that ignores it holds open for the 3 s grace period,
+  // while the relay keeps reading everything it sends).
+  assert.ok(await eventually(() => flooder.closed, 1000), "the flooding connection must be dropped straight away");
+  assert.ok(await tryAdmit(relay.port), "and the relay keeps serving");
+});
+
+test("a connection that was turned away is dropped on the first frame it sends instead of leaving", { timeout: 60000 }, async (t) => {
+  for (const kind of ["text", "ping", "pong"]) {
+    const relay = await startRelay(t, { RELAY_MAX_CONNECTIONS_PER_IP: "1" });
+    const holder = await connect(relay.port);
+    assert.ok(await admitted(holder));
+    const refused = await rawUpgrade(relay.port); // gets in, and is told to go away
+    t.after(() => refused.socket.destroy());
+    assert.match(refused.status, / 101 /);
+    refused.socket.write(frames(kind, 20));
+    assert.ok(await eventually(() => refused.closed, 1000), `a turned-away connection that sends ${kind} frames must be dropped straight away`);
+  }
+});
+
+test("survives X-Forwarded-For entries that are crafted to break address parsing", { timeout: 60000 }, async (t) => {
+  const relay = await startRelay(t);
+  const crafted = [
+    "1::2%a:b:c:d:e:f:g:h:i", // a zone suffix full of colons
+    "1::2%a:b:c:d:e:f:g:h:i:j:k:l",
+    "fe80::1%" + "z".repeat(100),
+    "::%::::::::::", ":::", "1:2:3:4:5:6:7:8:9", "[::1", "[", "]:", "%", "::%", "1.2.3.4.5", "::1.2.3.4:80", "::ffff:", "::ffff:999.1.1.1",
+    "0:0:0:0:0:ffff:1.2.3.4", ", , ,", "x".repeat(5000),
+  ];
+  for (const value of crafted) {
+    const client = await connect(relay.port, { "X-Forwarded-For": value });
+    assert.ok(await admitted(client), `a connection claiming ${JSON.stringify(value.slice(0, 40))} must still be served\n${relay.why()}`);
+    client.ws.close();
+  }
+  assertAlive(relay, "crafted X-Forwarded-For");
+});
+
 test("rate limit: exactly the allowed number of messages pass and the next one closes the connection", { timeout: 30000 }, async (t) => {
   const relay = await startRelay(t, { RELAY_RATE_LIMIT_MESSAGES: "5" });
   const client = await connect(relay.port);
@@ -265,7 +350,6 @@ test("rate limit: exactly the allowed number of messages pass and the next one c
   assert.equal(client.closeCode, null, "the connection stays open at the limit");
   client.ws.send('{"type":"restart"}'); // the sixth
   assert.ok(await eventually(() => client.closeCode !== null), "the sixth message must close the connection");
-  assert.equal(client.closeCode, 1008);
 });
 
 test("rate-limits each connection and closes one that floods", { timeout: 30000 }, async (t) => {
@@ -277,7 +361,6 @@ test("rate-limits each connection and closes one that floods", { timeout: 30000 
   const flood = await connect(relay.port);
   for (let i = 0; i < 100; i++) flood.ws.send('{"type":"restart"}');
   assert.ok(await eventually(() => flood.closeCode !== null), "a flooding connection must be closed");
-  assert.equal(flood.closeCode, 1008, "closed for breaking the policy");
   await assertStillServing(relay, "message flood");
 });
 
@@ -288,7 +371,7 @@ test("cuts off a peer that stops reading instead of buffering for it forever", {
   const { host, room } = await createGame(relay);
   const guest = await joinGame(relay, room);
   guest.ws.pause(); // the guest stops reading from its socket
-  const batch = '{"type":"move","move":{"from":12,"to":28}}';
+  const batch = JSON.stringify({ type: "move", move: E4 });
   for (let round = 0; round < 400 && !got(host, (m) => m.type === "opponent-left"); round++) {
     for (let i = 0; i < 1000; i++) host.ws.send(batch);
     await new Promise((resolve) => host.ws.send(batch, () => resolve())); // wait for this batch to leave before sending more
@@ -362,6 +445,7 @@ const ADDRESS_CASES = [
   { name: "a shortened IPv6 address is placed in the same /64 as its long form", first: "2001:db8::1", second: "2001:db8:0:0:9::2", sameClient: true },
   { name: "different IPv6 /64 networks are separate clients", first: "2001:db8:0:1::1", second: "2001:db8:0:2::1", sameClient: false },
   { name: "an IPv6 zone suffix is ignored", first: "fe80::1%eth0", second: "fe80::2", sameClient: true },
+  { name: "a zone suffix made of colons is ignored too", first: "1::2%a:b:c:d:e:f:g:h:i", second: "1::3", sameClient: true },
   // Some proxies add the client's port to the address.
   { name: "an IPv4 address with a port is that address", first: "10.0.0.7:5555", second: "10.0.0.7:6666", sameClient: true },
   { name: "different IPv4 addresses with ports are separate clients", first: "10.0.0.7:5555", second: "10.0.0.8:5555", sameClient: false },
@@ -471,7 +555,7 @@ test("a late close from a replaced connection does not drop the rejoined player"
     if (!handled) await sleep(25);
   }
   assert.ok(handled, "the relay must finish processing the old socket's close");
-  sendJson(host, { type: "move", move: { from: 12, to: 28 } });
+  sendJson(host, { type: "move", move: E4 });
   assert.ok(await eventually(() => got(guestNew, (m) => m.type === "opponent-move")), "the rejoined player must still receive moves");
   assert.ok(!got(host, (m) => m.type === "opponent-left"), "the host must not be told the opponent left");
 });
@@ -482,9 +566,9 @@ test("relays a normal game between two players", { timeout: 30000 }, async (t) =
   const guest = await joinGame(relay, room);
   assert.ok(guest.inbox.some((m) => m.type === "joined" && m.color === "b"));
   assert.ok(await eventually(() => got(host, (m) => m.type === "opponent-joined")));
-  sendJson(host, { type: "move", move: { from: 12, to: 28 } });
+  sendJson(host, { type: "move", move: E4 });
   assert.ok(await eventually(() => got(guest, (m) => m.type === "opponent-move" && m.move.to === 28)));
-  sendJson(guest, { type: "move", move: { from: 52, to: 36 } });
+  sendJson(guest, { type: "move", move: BLACK_E5 });
   assert.ok(await eventually(() => got(host, (m) => m.type === "opponent-move" && m.move.to === 36)));
   sendJson(host, { type: "restart" });
   assert.ok(await eventually(() => got(guest, (m) => m.type === "opponent-restart")));

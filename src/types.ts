@@ -47,28 +47,21 @@ export type TimeControlId = "none" | "bullet" | "blitz" | "rapid";
 
 // --- Online multiplayer wire protocol -------------------------------------
 
-/**
- * What travels between players for a move: the two squares and, for a pawn reaching the last rank, the piece chosen.
- * The receiving side works out everything else from the rules instead of trusting the sender (see opponentMove.ts).
- */
-export interface WireMove {
-  from: number;
-  to: number;
-  promotion?: PieceType;
-}
-
+// A move travels as the whole Move, so players on an older version of the site (which read all of it) keep working.
+// The receiving side does not trust it: it uses only the squares and promotion piece and checks them against the rules
+// (see opponentMove.ts), and the relay rebuilds the move from checked values before passing it on.
 export type ClientMessage =
   | { type: "create"; token: string; color: Color; timeControl: TimeControlId }
   | { type: "join"; room: string; token: string }
   | { type: "rejoin"; room: string; token: string }
-  | { type: "move"; move: WireMove }
+  | { type: "move"; move: Move }
   | { type: "restart" };
 
 export type ServerMessage =
   | { type: "created"; room: string; color: Color }
   | { type: "joined"; room: string; color: Color; timeControl: TimeControlId }
   | { type: "opponent-joined" }
-  | { type: "opponent-move"; move: WireMove }
+  | { type: "opponent-move"; move: Move }
   | { type: "opponent-restart" }
   | { type: "opponent-left" }
   | { type: "opponent-reconnected" }

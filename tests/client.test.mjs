@@ -278,7 +278,7 @@ test("leaving can keep the saved game so a reload can resume it, and by default 
   assert.equal(store.has("chess-net-room") || store.has("chess-net-token"), false, "a plain leave forgets the game");
 });
 
-test("a move is sent as just its squares and promotion piece, never the rest of the move", async (t) => {
+test("a move is sent whole, so players on an older version of the site can still read it", async (t) => {
   useSessionStorage(t);
   const latest = useFakeWebSocket(t);
   const conn = new RoomConnection("ws://fake");
@@ -288,13 +288,12 @@ test("a move is sent as just its squares and promotion piece, never the rest of 
   latest().receive({ type: "created", room: "ABCDE", color: "w" });
   await request;
   const piece = { type: "p", color: "w" };
-  conn.sendMove({ from: 12, to: 28, piece, capturedPiece: null, notation: "e4" });
-  conn.sendMove({ from: 52, to: 60, piece, capturedPiece: { type: "r", color: "b" }, promotion: "n", notation: "dxe8=N" });
+  const quiet = { from: 12, to: 28, piece, capturedPiece: null, notation: "" };
+  const promotion = { from: 52, to: 61, piece, capturedPiece: { type: "r", color: "b" }, promotion: "n", notation: "" };
+  conn.sendMove(quiet);
+  conn.sendMove(promotion);
   const moves = latest().sent.filter((m) => m.type === "move");
-  assert.deepEqual(moves, [
-    { type: "move", move: { from: 12, to: 28 } },
-    { type: "move", move: { from: 52, to: 60, promotion: "n" } },
-  ]);
+  assert.deepEqual(moves, [{ type: "move", move: quiet }, { type: "move", move: promotion }]);
 });
 
 test("moves cross the real relay and come out the other end as the engine's own legal moves", { timeout: 30000 }, async (t) => {
@@ -316,7 +315,7 @@ test("moves cross the real relay and come out the other end as the engine's own 
     host.sendMove(opening);
     host.sendMove(promotion);
     assert.ok(await eventually(() => received.length === 2), "both moves must arrive");
-    assert.deepEqual(received, [{ from: idx("e2"), to: idx("e4") }, { from: idx("a7"), to: idx("a8"), promotion: "n" }], "what travels is only the squares");
+    assert.deepEqual(received, JSON.parse(JSON.stringify([opening, promotion])), "the whole move arrives, so older versions of the site can read it");
     assert.deepEqual(resolveOpponentMove(start, "w", received[0]), opening);
     assert.deepEqual(resolveOpponentMove(promotionPosition, "w", received[1]), promotion);
   } finally {

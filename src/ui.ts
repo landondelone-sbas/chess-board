@@ -501,6 +501,8 @@ export class ChessUI {
       this.renderOnlinePanel();
       this.net!.createRoom(this.onlinePreferredColor, TIME_CONTROLS[this.timeControlIndex].id)
         .then(({ color }) => {
+          // A game kept from an earlier failed resume must not be restored into this new room by a reload.
+          sessionStorage.removeItem(ONLINE_STATE_KEY);
           this.onlineColor = color;
           this.onlineStep = "waiting";
           this.renderOnlinePanel();

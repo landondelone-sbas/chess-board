@@ -1,4 +1,4 @@
-import type { ClientMessage, Color, ConnectionStatus, Move, ServerMessage, TimeControlId, WireMove } from "./types";
+import type { ClientMessage, Color, ConnectionStatus, Move, ServerMessage, TimeControlId } from "./types";
 
 type ConnectResult = { room: string; color: Color; timeControl?: TimeControlId };
 
@@ -22,7 +22,7 @@ export class RoomConnection {
 
   private pendingConnect: { resolve: (v: ConnectResult) => void; reject: (e: Error) => void } | null = null;
 
-  private moveHandler: ((move: WireMove) => void) | null = null;
+  private moveHandler: ((move: Move) => void) | null = null;
   private opponentJoinedHandler: (() => void) | null = null;
   private opponentLeftHandler: (() => void) | null = null;
   private opponentReconnectedHandler: (() => void) | null = null;
@@ -54,8 +54,8 @@ export class RoomConnection {
     return sessionStorage.getItem(TOKEN_KEY) !== null && sessionStorage.getItem(ROOM_KEY) !== null;
   }
 
-  /** The callback gets only the squares (and promotion piece); the receiver checks them against the rules. */
-  onOpponentMove(cb: (move: WireMove) => void) {
+  /** What arrives is the opponent's word: the receiver must check it against the rules before playing it. */
+  onOpponentMove(cb: (move: Move) => void) {
     this.moveHandler = cb;
   }
   onOpponentJoined(cb: () => void) {
@@ -89,7 +89,7 @@ export class RoomConnection {
   }
 
   sendMove(move: Move) {
-    this.send({ type: "move", move: { from: move.from, to: move.to, ...(move.promotion ? { promotion: move.promotion } : {}) } });
+    this.send({ type: "move", move });
   }
 
   sendRestart() {
