@@ -4,6 +4,8 @@ import { createInitialState, getLegalMoves, makeMove } from "./engine";
 import { findKing, generatePseudoLegalMoves, getAttackers } from "./moveGenerator";
 import { chooseComputerMove } from "./ai";
 import { RoomConnection } from "./net";
+import { describeRejoinError, describeRelayError, isPermanentRejoinFailure } from "./relayErrors";
+import { resolveOpponentMove } from "./opponentMove";
 
 const DIFFICULTY_LABELS = ["Easy", "Medium", "Hard"] as const;
 const DIFFICULTY_DEPTHS = [1, 2, 3] as const;
@@ -39,6 +41,10 @@ function formatClock(ms: number): string {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function escapeHtml(text: string): string {
+  return text.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]!);
 }
 
 const PIECE_GLYPHS: Record<Piece["color"], Record<PieceType, string>> = {
@@ -83,6 +89,7 @@ export class ChessUI {
 
   private root: HTMLElement;
   private boardEl!: HTMLElement;
+  private boardColumnEl!: HTMLElement;
   private statusEl!: HTMLElement;
   private onlineBanner!: HTMLElement;
   private capturedWhiteEl!: HTMLElement;
@@ -161,6 +168,7 @@ export class ChessUI {
     `;
 
     this.boardEl = this.root.querySelector("#board")!;
+    this.boardColumnEl = this.root.querySelector(".board-column")!;
     this.statusEl = this.root.querySelector("#status")!;
     this.onlineBanner = this.root.querySelector("#online-banner")!;
     this.capturedWhiteEl = this.root.querySelector("#captured-white")!;
@@ -236,15 +244,16 @@ export class ChessUI {
         }
       });
 
-      if (rankOf(i) === 0) {
+      // Labels sit on White's near edges; the "far" copies show instead when the board is flipped for Black.
+      if (rankOf(i) === 0 || rankOf(i) === 7) {
         const fileLabel = document.createElement("span");
-        fileLabel.className = "coord-label file-label";
+        fileLabel.className = rankOf(i) === 0 ? "coord-label file-label" : "coord-label file-label far";
         fileLabel.textContent = toAlgebraic(i)[0];
         square.appendChild(fileLabel);
       }
-      if (fileOf(i) === 0) {
+      if (fileOf(i) === 0 || fileOf(i) === 7) {
         const rankLabel = document.createElement("span");
-        rankLabel.className = "coord-label rank-label";
+        rankLabel.className = fileOf(i) === 0 ? "coord-label rank-label" : "coord-label rank-label far";
         rankLabel.textContent = toAlgebraic(i)[1];
         square.appendChild(rankLabel);
       }
@@ -355,9 +364,14 @@ export class ChessUI {
           this.hideOnlineModal();
           this.render();
         })
-        .catch(() => {
-          this.net?.leave();
-          sessionStorage.removeItem(ONLINE_STATE_KEY);
+        .catch((err: unknown) => {
+          const code = err instanceof Error ? err.message : undefined;
+          // Forget the saved game only when it can never be resumed (the room is gone). A refusal or a dropped
+          // connection may pass, so keep it and let a reload try again.
+          const permanent = isPermanentRejoinFailure(code);
+          this.net?.leave(!permanent);
+          if (permanent) sessionStorage.removeItem(ONLINE_STATE_KEY);
+          this.onlineError = describeRejoinError(code);
           this.onlineStep = "choice";
           this.renderOnlinePanel();
         });
@@ -378,7 +392,11 @@ export class ChessUI {
       this.startNewGame();
       this.hideOnlineModal();
     });
-    net.onOpponentMove((move) => {
+    net.onOpponentMove((received) => {
+      // Play only a move that is legal for the opponent right now, taken from the engine's own list; anything else
+      // that arrives (out of turn, impossible, tampered with) is ignored.
+      const move = this.onlineColor ? resolveOpponentMove(this.state, opponent(this.onlineColor), received) : null;
+      if (!move) return;
       this.state = makeMove(this.state, move);
       this.selected = null;
       this.legalMoves = [];
@@ -435,10 +453,10 @@ export class ChessUI {
 
     const activeRoom = this.net?.currentRoom ?? null;
     if (this.onlineStep === "waiting" && activeRoom) {
-      const link = `${location.origin}${location.pathname}?room=${activeRoom}`;
+      const link = `${location.origin}${location.pathname}?room=${encodeURIComponent(activeRoom)}`;
       body.innerHTML = `
         <p>Share this code or link with your opponent:</p>
-        <div class="room-code">${activeRoom}</div>
+        <div class="room-code">${escapeHtml(activeRoom)}</div>
         <button type="button" class="primary-btn" id="online-copy-link">Copy Link</button>
         <p class="online-waiting">Waiting for opponent to join…</p>
       `;
@@ -461,7 +479,7 @@ export class ChessUI {
       <button type="button" class="primary-btn" id="online-create-btn">Create Game</button>
       <hr />
       <div class="online-row">
-        <input type="text" id="online-room-input" maxlength="5" placeholder="Room code" value="${roomCodeInputValue}" />
+        <input type="text" id="online-room-input" maxlength="5" placeholder="Room code" />
         <button type="button" class="primary-btn" id="online-join-btn">Join Game</button>
       </div>
       ${errorHtml}
@@ -487,14 +505,15 @@ export class ChessUI {
           this.onlineStep = "waiting";
           this.renderOnlinePanel();
         })
-        .catch(() => {
-          this.onlineError = "Could not create a game. Please try again.";
+        .catch((err: unknown) => {
+          this.onlineError = describeRelayError(err instanceof Error ? err.message : undefined, "create");
           this.onlineStep = "choice";
           this.renderOnlinePanel();
         });
     });
 
     const input = body.querySelector<HTMLInputElement>("#online-room-input")!;
+    input.value = roomCodeInputValue.slice(0, 5); // set as a property, never spliced into the HTML
     body.querySelector("#online-join-btn")!.addEventListener("click", () => {
       const code = input.value.trim();
       if (!code) return;
@@ -511,8 +530,8 @@ export class ChessUI {
           this.startNewGame();
           this.hideOnlineModal();
         })
-        .catch((err: Error) => {
-          this.onlineError = err.message === "room-full" ? "That room is already full." : "Room not found — check the code.";
+        .catch((err: unknown) => {
+          this.onlineError = describeRelayError(err instanceof Error ? err.message : undefined, "join");
           this.onlineStep = "choice";
           this.renderOnlinePanel(code);
         });
@@ -609,9 +628,17 @@ export class ChessUI {
     }, 50);
   }
 
+  /** Whose pieces sit at the bottom: the human's side against the computer or online, otherwise White. */
+  private viewColor(): Color {
+    if (this.opponent === "computer") return this.humanColor;
+    if (this.opponent === "online" && this.onlineColor) return this.onlineColor;
+    return "w";
+  }
+
   private render() {
     const { board, turn, status, moveHistory, capturedPieces } = this.state;
 
+    this.boardColumnEl.classList.toggle("black-view", this.viewColor() === "b");
     this.boardEl.classList.toggle("show-coords", this.showCoords);
     this.teachingToggle.textContent = `Teaching Mode: ${this.teachingMode ? "On" : "Off"}`;
     this.teachingToggle.classList.toggle("active", this.teachingMode);

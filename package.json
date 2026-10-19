@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "node --import ./tests/register.mjs --test tests/engine.test.mjs tests/opponentMove.test.mjs tests/relay.test.mjs tests/client.test.mjs"
   },
   "devDependencies": {
     "typescript": "~6.0.2",

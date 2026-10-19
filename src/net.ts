@@ -1,4 +1,4 @@
-import type { ClientMessage, Color, ConnectionStatus, Move, ServerMessage, TimeControlId } from "./types";
+import type { ClientMessage, Color, ConnectionStatus, Move, ServerMessage, TimeControlId, WireMove } from "./types";
 
 type ConnectResult = { room: string; color: Color; timeControl?: TimeControlId };
 
@@ -22,7 +22,7 @@ export class RoomConnection {
 
   private pendingConnect: { resolve: (v: ConnectResult) => void; reject: (e: Error) => void } | null = null;
 
-  private moveHandler: ((move: Move) => void) | null = null;
+  private moveHandler: ((move: WireMove) => void) | null = null;
   private opponentJoinedHandler: (() => void) | null = null;
   private opponentLeftHandler: (() => void) | null = null;
   private opponentReconnectedHandler: (() => void) | null = null;
@@ -54,7 +54,8 @@ export class RoomConnection {
     return sessionStorage.getItem(TOKEN_KEY) !== null && sessionStorage.getItem(ROOM_KEY) !== null;
   }
 
-  onOpponentMove(cb: (move: Move) => void) {
+  /** The callback gets only the squares (and promotion piece); the receiver checks them against the rules. */
+  onOpponentMove(cb: (move: WireMove) => void) {
     this.moveHandler = cb;
   }
   onOpponentJoined(cb: () => void) {
@@ -88,17 +89,22 @@ export class RoomConnection {
   }
 
   sendMove(move: Move) {
-    this.send({ type: "move", move });
+    this.send({ type: "move", move: { from: move.from, to: move.to, ...(move.promotion ? { promotion: move.promotion } : {}) } });
   }
 
   sendRestart() {
     this.send({ type: "restart" });
   }
 
-  /** Clears the saved session and closes the socket (used when leaving online mode). */
-  leave() {
-    sessionStorage.removeItem(TOKEN_KEY);
-    sessionStorage.removeItem(ROOM_KEY);
+  /**
+   * Closes the socket and clears the saved session (used when leaving online mode). With keepSession the saved session
+   * stays, so a page reload can try to resume the game (used when resuming failed for a reason that may pass).
+   */
+  leave(keepSession = false) {
+    if (!keepSession) {
+      sessionStorage.removeItem(TOKEN_KEY);
+      sessionStorage.removeItem(ROOM_KEY);
+    }
     this.socket?.close();
     this.socket = null;
     this.room = null;
@@ -137,10 +143,26 @@ export class RoomConnection {
     return new Promise((resolve, reject) => {
       const socket = new WebSocket(this.url);
       this.socket = socket;
+      let opened = false;
 
-      socket.addEventListener("open", () => resolve(socket));
+      socket.addEventListener("open", () => {
+        opened = true;
+        resolve(socket);
+      });
       socket.addEventListener("error", () => reject(new Error("connection-failed")));
-      socket.addEventListener("close", () => {
+      socket.addEventListener("close", (event) => {
+        if (this.socket !== socket) return; // a replaced socket closing late must not touch the current one
+        if (this.pendingConnect) {
+          // The request is still waiting for an answer that will never come. Without this the promise never settles
+          // and the screen stays on "Creating room…". Code 1013 is the relay saying too many connections from this
+          // address; a socket that never opened means the relay could not be reached (the error event may not have
+          // been handled yet when the close arrives, so this decides the reason itself).
+          const pending = this.pendingConnect;
+          this.pendingConnect = null;
+          this.setStatus("idle");
+          pending.reject(new Error(event.code === 1013 ? "too-many-connections" : opened ? "connection-closed" : "connection-failed"));
+          return;
+        }
         if (this.room) this.setStatus("disconnected");
       });
       socket.addEventListener("message", (event) => this.handleMessage(event.data));
@@ -194,10 +216,15 @@ export class RoomConnection {
         this.setStatus("connected");
         this.opponentReconnectedHandler?.();
         break;
-      case "error":
-        this.pendingConnect?.reject(new Error(msg.message));
+      case "error": {
+        const pending = this.pendingConnect;
         this.pendingConnect = null;
+        if (pending) {
+          this.setStatus("idle"); // the attempt failed: do not leave the banner on "Reconnecting…"
+          pending.reject(new Error(msg.message));
+        }
         break;
+      }
     }
   }
 }
